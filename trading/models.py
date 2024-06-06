@@ -42,4 +42,3 @@ class Trade(models.Model):
     execution_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0.01)])
     execution_time = models.DateTimeField(auto_now_add=True)
     trade_volume = models.IntegerField(validators=[MinValueValidator(1)])
-
