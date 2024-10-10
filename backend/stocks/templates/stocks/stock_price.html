@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock Price</title>
+  </head>
+  <body>
+    <h1>Stock Price</h1>
+    <div id="stock-price"></div>
+
+    <script>
+      async function fetchStockPrice(symbol) {
+        try {
+          const response = await fetch(`/stocks/stock_gen_info/${symbol}/`);
+          if (!response.ok) {
+            throw new Error("Network response was not ok");
+          }
+          const data = await response.json();
+          document.getElementById(
+            "stock-price"
+          ).innerText = `Current Price: ${data.current_price}`;
+        } catch (error) {
+          console.error(
+            "There has been a problem with your fetch operation:",
+            error
+          );
+          document.getElementById("stock-price").innerText =
+            "Error fetching stock price";
+        }
+      }
+
+      fetchStockPrice(`{{symbol}}`); // Change 'AAPL' to the symbol you want to test
+    </script>
+  </body>
+</html>
