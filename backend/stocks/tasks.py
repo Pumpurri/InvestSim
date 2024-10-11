@@ -2,6 +2,10 @@ from celery import shared_task
 import requests
 from .models import Stock
 from math import ceil
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 companies = [
     {'symbol': 'AAPL', 'name': 'Apple Inc.'},
@@ -96,7 +100,7 @@ def batch_companies(companies, batch_size=20):
 @shared_task
 def fetch_stock_prices():
     batches = batch_companies(companies, batch_size=20)
-    api_key = "lU7kZOh9e7xeHd8HBzYL00jZzaPovqYO"
+    api_key = os.getenv('API_KEY')
 
     for batch in batches:
         symbols = ','.join([company['symbol'] for company in batch])

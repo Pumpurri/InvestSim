@@ -1,8 +1,12 @@
 import requests
 from .models import Stock
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def fetch_current_price(symbol): 
-    api_key = "lU7kZOh9e7xeHd8HBzYL00jZzaPovqYO"
+    api_key = os.getenv('API_KEY')
     url = f'https://financialmodelingprep.com/api/v3/quote/{symbol}/?apikey={api_key}'
 
     try:
