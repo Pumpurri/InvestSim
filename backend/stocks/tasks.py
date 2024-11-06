@@ -1,11 +1,7 @@
 from celery import shared_task
-import requests
 from .models import Stock
 from math import ceil
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+from .services import fetch_data_for_companies
 
 companies = [
     {'symbol': 'AAPL', 'name': 'Apple Inc.'},
@@ -94,33 +90,44 @@ companies = [
 ]
 
 def batch_companies(companies, batch_size=20):
+    """
+    Divide the list of companies into batches of a specified size.
+    """
     num_batches = ceil(len(companies) / batch_size)
     return [companies[i*batch_size: (i+1)*batch_size] for i in range(num_batches)]
 
+
+def update_stock_prices(data):
+    """
+    Update stock prices in the database based on the fetched data.
+    """
+    if not data:
+        return
+    
+    for stock_info in data:
+        symbol = stock_info.get('symbol')
+        current_price = stock_info.get('price', 0.0)
+        name = stock_info.get('name', 'Unknown')
+
+        Stock.objects.update_or_create(
+            symbol=symbol,
+            defaults={'name':name, 'current_price':current_price}
+        )
+
+
 @shared_task
 def fetch_stock_prices():
+    """
+    Celery task to fetch and update stock prices for all companies
+    """
     batches = batch_companies(companies, batch_size=20)
-    api_key = os.getenv('API_KEY')
 
     for batch in batches:
         symbols = ','.join([company['symbol'] for company in batch])
-        url = f'https://financialmodelingprep.com/api/v3/quote/{symbols}?apikey={api_key}'
+        data = fetch_data_for_companies(symbols)
 
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching stock data for {symbols}: {e}")
-            continue
-
-        for company, stock_info in zip(batch, data):
-            symbol = company['symbol']
-            current_price = stock_info.get('price', 0.0)
-
-            Stock.objects.update_or_create(
-                symbol=symbol,
-                defaults={'name': company['name'], 'current_price': current_price}
-            )
-
+        if data:
+            update_stock_prices(data)
+        
         print(f"Updated stock prices for batch: {symbols}")
+        

@@ -4,6 +4,8 @@ from django.core.validators import MinValueValidator
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
 import datetime
+from django.apps import apps
+from decimal import Decimal
 
 # Model representing a user's portfolio
 class Portfolio(models.Model):
@@ -22,24 +24,30 @@ class Portfolio(models.Model):
     def save(self, *args, **kwargs):
         # On initial save, set cash balance to initial deposit
         if not self.pk:
-            self.cash_balance = self.initial_deposit
+            self.cash_balance = Decimal(self.initial_deposit)
+            self.total_value = Decimal(self.initial_deposit)
+            self.total_contributions = Decimal(self.initial_deposit)
         super().save(*args, **kwargs)
     
     def update_total_value(self):
         # Calculate the total value of the portfolio by summing the value of all holdings and cash balance
-        print("TESTING UPDATE TV")
-        print("Calculating total value of portfolio")
-        total_holdings_value = float(sum(holding.quantity * holding.current_price for holding in self.holdings.all()))
-        print(f"Total holdings value: {total_holdings_value}. also: {type(total_holdings_value)}")
-        print(f"Cash balance: {self.cash_balance}. also: {type(self.cash_balance)}")
+        total_holdings_value = Decimal(sum(holding.quantity * holding.current_price for holding in self.holdings.all()))
         self.total_value = total_holdings_value + self.cash_balance
-        print(f"Updated total value: {self.total_value}")
         self.save()
 
     def calc_cost_basis(self):
         # Calculate the cost basis of the portfolio (total purchase price of holdings)
-        cost_basis = sum(holding.quantity * holding.purchase_price for holding in self.holdings.all())
-        return cost_basis
+        total_cost = Decimal(0)
+        total_quantity = Decimal(0)
+        
+        for transaction in self.transactions.filter(type=TransactionType.BUY):
+            total_cost += transaction.price * transaction.quantity
+            total_quantity += transaction.quantity
+        
+        # Avoid division by zero
+        if total_quantity > 0:
+            return total_cost / total_quantity
+        return 0
 
     def total_return(self):
         # Calculate the total return on the portfolio
@@ -63,8 +71,8 @@ class Portfolio(models.Model):
     def risk_metrics(self):
         pass
 
-    # def asset_allocation(self):
-    #     pass
+    def asset_allocation(self):
+        pass
     
 # Model representing individual holdings within a portfolio
 class Holding(models.Model):
@@ -72,17 +80,22 @@ class Holding(models.Model):
     symbol = models.CharField(max_length=10)
     quantity = models.IntegerField(validators=[MinValueValidator(0)])
     purchase_price = models.DecimalField(max_digits=10, decimal_places=2)
-    current_price = models.DecimalField(max_digits=10, decimal_places=2) 
     # TODO: category = models.CharField(max_length=20) # Optional: Category of the holding to do asset allocation
 
     @classmethod
     def get_or_create_holding(cls, portfolio, symbol,
-                              purchase_price, current_price):
-        # Get or create a holding for a given portfolio and stock symbol
+                              purchase_price):
+        Stock = apps.get_model('stocks', 'Stock')
+        try:
+            stock = Stock.objects.get(symbol=symbol)
+            current_price = stock.current_price
+        except Stock.DoesNotExist:
+            raise ValidationError(f"Stock with symbol {symbol} does not exist.")
+        
         holding, created = cls.objects.get_or_create(
             portfolio=portfolio,
             symbol=symbol,
-            defaults={'quantity': 0, 'purchase_price': purchase_price, 'current_price': current_price}
+            defaults={'quantity': 0, 'purchase_price': purchase_price}
         )
         return holding, created
 
@@ -99,32 +112,35 @@ class Transaction(models.Model):
     date = models.DateTimeField(auto_now_add=True)
     symbol = models.CharField(max_length=10)
     quantity = models.IntegerField(validators=[MinValueValidator(0)])
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False, default=Decimal('0.00'))
+
+    def save(self, *args, **kwargs):
+        if self.price is None:
+            Stock = apps.get_model('stocks', 'Stock')
+            try:
+                stock = Stock.objects.get(symbol=self.symbol)
+                self.price = stock.current_price
+            except Stock.DoesNotExist:
+                raise ValidationError(f"Stock with symbol {self.symbol} does not exist.")
+
+        self.total_amount = self.quantity * self.price
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def update_holding_quantity(self):
-        # Update the holding quantity based on the transaction type (buy/sell)
         holding, created = Holding.get_or_create_holding(
             portfolio=self.portfolio,
             symbol=self.symbol,
             purchase_price=self.price,
-            current_price=self.get_current_market_price(self.symbol) # Revise to actual functionality
         )
         if self.type == TransactionType.BUY:
-            print("TESTING UPDATE HOLDING QUANTITY BUY")
-            print(f"Type of self.quantity: {type(self.quantity)}")
-            print(f"Type of self.price: {type(self.price)}")
-            if (self.quantity * self.price) > self.portfolio.cash_balance:
-                # print(f"ValidationError: Total purchase price xxx is more than cash balance ({self.portfolio.cash_balance})")
+            if self.total_amount > self.portfolio.cash_balance:
                 raise ValidationError("Total purchase price is more than cash balance.")
             holding.quantity += self.quantity
             self.portfolio.cash_balance -= self.total_amount
         elif self.type == TransactionType.SELL:
-            print("\nTESTING UPDATE HOLDING QUANTITY SELL")
-            print(f"Type of holding.quantity: {type(holding.quantity)}")
-            print(f"Type of self.quantity: {type(self.quantity)}")
             if (holding.quantity - self.quantity) < 0:
-                # print(f"ValidationError: Cannot sell more shares ({self.quantity}) than are held ({holding.quantity})")
                 raise ValidationError("Cannot sell more shares than are held.")
             holding.quantity -= self.quantity
             self.portfolio.cash_balance += self.total_amount
@@ -132,9 +148,6 @@ class Transaction(models.Model):
         holding.save()
         self.portfolio.save()
         self.portfolio.update_total_value()
-
-    def get_current_market_price(self,symbol):
-        return 150.00   # revise to actual functionality
 
 # Model representing contributions made to a portfolio
 class Contribution(models.Model):

@@ -1,27 +1,29 @@
-from django.shortcuts import render, get_object_or_404
-from django.http import JsonResponse
+from rest_framework import generics, status
 from .models import Stock
+from .serializers import StockSerializer
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
 
+class StockList(generics.ListCreateAPIView):
+    queryset = Stock.objects.all()
+    serializer_class = StockSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+class StockDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Stock.objects.all()
+    serializer_class = StockSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+@api_view(['GET'])
 def stock_info_json(request, symbol):
+    """
+    Retrieve stock information by symbol.
+    """
     try:
-        stock = Stock.objects.get(symbol=symbol)
-        data = {
-            'symbol': stock.symbol,
-            'name': stock.name,
-            'current_price': stock.current_price,
-            'last_updated': stock.last_updated,
-        }    
-        return JsonResponse(data)   
+        stock = Stock.objects.get(symbol__iexact=symbol)
     except Stock.DoesNotExist:
-        return JsonResponse({'Error': 'Stock not found'}, status=404)
+        return Response({'error': 'Stock not found'}, status=status.HTTP_404_NOT_FOUND)
 
-
-def stock_price_template_view(request, symbol): 
-    stock = get_object_or_404(Stock, symbol=symbol)
-    data = {
-        'symbol': stock.symbol,
-        'name': stock.name,
-        'current_price': stock.current_price,
-        'last_updated': stock.last_updated,
-    }
-    return render(request, 'stocks/stock_price.html', data)
+    serializer = StockSerializer(stock)
+    return Response(serializer.data, status=status.HTTP_200_OK)

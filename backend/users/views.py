@@ -1,6 +1,13 @@
-from django.shortcuts import render
-from django.http import HttpResponse
+from django.contrib.auth import get_user_model
+from rest_framework import generics
+from .serializers import UserSerializer
 
-# Create your views here.
-def index(request):
-    return HttpResponse("Hello, first try")
+User = get_user_model()
+
+class UserList(generics.ListAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+
+class UserDetail(generics.RetrieveAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer

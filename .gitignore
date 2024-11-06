@@ -2,3 +2,10 @@
 *.pyc
 __pycache__/
 db.sqlite3
+venv/
+
+
+To run rabbitmq/celery:
+sudo rabbitmq-server start / sudo rabbitmqctl status
+celery -A TradeSimulator worker --loglevel=INFO
+celery -A TradeSimulator beat --scheduler django_celery_beat.schedulers:DatabaseScheduler --loglevel=INFO
