@@ -7,7 +7,7 @@ class PortfolioAdmin(admin.ModelAdmin):
 
 @admin.register(Holding)
 class HoldingAdmin(admin.ModelAdmin):
-    list_display = ('portfolio', 'symbol', 'quantity', 'purchase_price')
+    list_display = ('portfolio', 'symbol', 'quantity', 'average_cost')
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
