@@ -1,164 +1,222 @@
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
-import datetime
-from django.apps import apps
+from django.utils import timezone
+from django.db.models import F, Sum
 from decimal import Decimal
+import logging
 
-# Model representing a user's portfolio
+logger = logging.getLogger(__name__)
+
+class PortfolioManager(models.Manager):
+    def create_portfolio(self, user, name, initial_deposit=Decimal('0.00')):
+        if initial_deposit < Decimal('0.00'):
+            raise ValidationError("Initial deposit cannot be negative")
+            
+        return self.create(
+            user=user,
+            name=name,
+            initial_deposit=initial_deposit,
+            cash_balance=initial_deposit,
+            total_value=initial_deposit,
+            total_contributions=initial_deposit
+        )
+
 class Portfolio(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    name = models.CharField(max_length=50) 
-    created_date = models.DateTimeField(auto_now_add=True)
-    initial_deposit = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.00)], default=0.00)
-    total_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='portfolios'
+    )
+    name = models.CharField(max_length=50, db_index=True)
+    created_date = models.DateTimeField(default=timezone.now, editable=False)
+    initial_deposit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.00'))]
+    )
+    total_value = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
     cash_balance = models.DecimalField(
-        max_digits=12, decimal_places=2, validators=[MinValueValidator(0.00)], default=0.00
-        ) 
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
     total_contributions = models.DecimalField(
-        max_digits=12, decimal_places=2, validators=[MinValueValidator(0.00)], default=0.00
-        ) 
-    
-    def save(self, *args, **kwargs):
-        # On initial save, set cash balance to initial deposit
-        if not self.pk:
-            self.cash_balance = Decimal(self.initial_deposit)
-            self.total_value = Decimal(self.initial_deposit)
-            self.total_contributions = Decimal(self.initial_deposit)
-        super().save(*args, **kwargs)
-    
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+
+    objects = PortfolioManager()
+
+    class Meta:
+        unique_together = ('user', 'name')
+        ordering = ['-created_date']
+
+    def __str__(self):
+        return f"{self.user.email}'s {self.name} Portfolio"
+
     def update_total_value(self):
-        # Calculate the total value of the portfolio by summing the value of all holdings and cash balance
-        total_holdings_value = Decimal(sum(holding.quantity * holding.current_price for holding in self.holdings.all()))
-        self.total_value = total_holdings_value + self.cash_balance
+        try:
+            holdings_value = self.holdings.aggregate(
+                total=Sum(F('quantity') * F('current_price')))
+            total_holdings = holdings_value['total'] or Decimal('0.00')
+            self.total_value = total_holdings + self.cash_balance
+            self.save(update_fields=['total_value'])
+        except Exception as e:
+            logger.error(f"Error updating portfolio {self.id} value: {str(e)}")
+            raise
+
+    def get_cost_basis(self):
+        return self.transactions.filter(
+            type=Transaction.TransactionType.BUY
+        ).aggregate(
+            total=Sum(F('quantity') * F('price'))
+        )['total'] or Decimal('0.00')
+
+    def get_total_return(self):
+        cost_basis = self.get_cost_basis()
+        if cost_basis == Decimal('0.00'):
+            return Decimal('0.00')
+        return ((self.total_value - cost_basis) / cost_basis) * 100
+
+class HoldingManager(models.Manager):
+    def get_holding(self, portfolio, symbol):
+        return self.get_queryset().get(
+            portfolio=portfolio,
+            symbol=symbol.upper()
+        )
+
+class Holding(models.Model):
+    portfolio = models.ForeignKey(
+        Portfolio,
+        related_name='holdings',
+        on_delete=models.CASCADE
+    )
+    symbol = models.CharField(max_length=10, db_index=True)
+    quantity = models.PositiveIntegerField(default=0)
+    average_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    objects = HoldingManager()
+
+    class Meta:
+        unique_together = ('portfolio', 'symbol')
+        ordering = ['symbol']
+
+    @property
+    def current_price(self):
+        from .services import get_current_price  # Circular import protection
+        return get_current_price(self.symbol)
+
+    @property
+    def market_value(self):
+        return Decimal(self.quantity) * self.current_price
+
+    @property
+    def unrealized_gain(self):
+        return (self.current_price - self.average_cost) * self.quantity
+
+    def update_average_cost(self, new_quantity, new_price):
+        total_cost = (self.quantity * self.average_cost) + (new_quantity * new_price)
+        total_shares = self.quantity + new_quantity
+        self.average_cost = total_cost / total_shares
         self.save()
 
-    def calc_cost_basis(self):
-        # Calculate the cost basis of the portfolio (total purchase price of holdings)
-        total_cost = Decimal(0)
-        total_quantity = Decimal(0)
-        
-        for transaction in self.transactions.filter(type=TransactionType.BUY):
-            total_cost += transaction.price * transaction.quantity
-            total_quantity += transaction.quantity
-        
-        # Avoid division by zero
-        if total_quantity > 0:
-            return total_cost / total_quantity
-        return 0
-
-    def total_return(self):
-        # Calculate the total return on the portfolio
-        cost_basis = self.calc_cost_basis()
-        current_value = self.total_value - self.cash_balance    # Calculate ONLY investment value
-        if cost_basis > 0:
-            return ((current_value - cost_basis) / cost_basis) * 100
-        return 0
-    
-    def annualized_return(self):
-        # Calculate the annualized return of the portfolio
-        duration = datetime.datetime.now() - self.created_date
-        years = duration.days / 365.25
-
-        if years < 1:
-            return 0
-        
-        total_return = self.total_return() / 100
-        return (((1 + total_return) ** (1 / years)) - 1) * 100
-        
-    def risk_metrics(self):
-        pass
-
-    def asset_allocation(self):
-        pass
-    
-# Model representing individual holdings within a portfolio
-class Holding(models.Model):
-    portfolio = models.ForeignKey(Portfolio, related_name='holdings', on_delete=models.CASCADE)
-    symbol = models.CharField(max_length=10)
-    quantity = models.IntegerField(validators=[MinValueValidator(0)])
-    purchase_price = models.DecimalField(max_digits=10, decimal_places=2)
-    # TODO: category = models.CharField(max_length=20) # Optional: Category of the holding to do asset allocation
-
-    @classmethod
-    def get_or_create_holding(cls, portfolio, symbol,
-                              purchase_price):
-        Stock = apps.get_model('stocks', 'Stock')
-        try:
-            stock = Stock.objects.get(symbol=symbol)
-            current_price = stock.current_price
-        except Stock.DoesNotExist:
-            raise ValidationError(f"Stock with symbol {symbol} does not exist.")
-        
-        holding, created = cls.objects.get_or_create(
-            portfolio=portfolio,
-            symbol=symbol,
-            defaults={'quantity': 0, 'purchase_price': purchase_price}
-        )
-        return holding, created
-
-# Choices for transaction types
-class TransactionType(models.TextChoices):
-    BUY = 'BUY', _('Buy')
-    SELL = 'SELL', _('Sell')
-    # TODO: DIVIDEND = 'DIVIDEND', _('Dividend')
-
-# Model representing transactions associated with a portfolio
 class Transaction(models.Model):
-    portfolio = models.ForeignKey(Portfolio, related_name='transactions', on_delete=models.CASCADE)
-    type = models.CharField(max_length=20, choices=TransactionType.choices)
-    date = models.DateTimeField(auto_now_add=True)
-    symbol = models.CharField(max_length=10)
-    quantity = models.IntegerField(validators=[MinValueValidator(0)])
-    price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False, default=Decimal('0.00'))
+    class TransactionType(models.TextChoices):
+        BUY = 'BUY', 'Buy'
+        SELL = 'SELL', 'Sell'
+        DIVIDEND = 'DIVIDEND', 'Dividend'
+        SPLIT = 'SPLIT', 'Stock Split'
+
+    portfolio = models.ForeignKey(
+        Portfolio,
+        related_name='transactions',
+        on_delete=models.CASCADE
+    )
+    type = models.CharField(
+        max_length=10,
+        choices=TransactionType.choices,
+        db_index=True
+    )
+    symbol = models.CharField(max_length=10, db_index=True)
+    quantity = models.PositiveIntegerField()
+    price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.00'))]
+    )
+    date = models.DateTimeField(default=timezone.now, db_index=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-date']
+        indexes = [
+            models.Index(fields=['portfolio', 'date']),
+            models.Index(fields=['symbol', 'type']),
+        ]
+
+    @property
+    def total_amount(self):
+        return self.quantity * self.price
+
+    def clean(self):
+        if self.price <= Decimal('0.00'):
+            raise ValidationError({'price': 'Price must be positive'})
+        
+        if self.type == Transaction.TransactionType.SELL:
+            holding = self.portfolio.holdings.filter(symbol=self.symbol).first()
+            if not holding or holding.quantity < self.quantity:
+                raise ValidationError(
+                    {'quantity': 'Not enough shares to sell'}
+                )
 
     def save(self, *args, **kwargs):
-        if self.price is None:
-            Stock = apps.get_model('stocks', 'Stock')
-            try:
-                stock = Stock.objects.get(symbol=self.symbol)
-                self.price = stock.current_price
-            except Stock.DoesNotExist:
-                raise ValidationError(f"Stock with symbol {self.symbol} does not exist.")
-
-        self.total_amount = self.quantity * self.price
         self.full_clean()
         super().save(*args, **kwargs)
 
-    def update_holding_quantity(self):
-        holding, created = Holding.get_or_create_holding(
-            portfolio=self.portfolio,
-            symbol=self.symbol,
-            purchase_price=self.price,
+class ContributionManager(models.Manager):
+    def contribute(self, portfolio, amount):
+        if amount <= Decimal('0.00'):
+            raise ValidationError("Contribution amount must be positive")
+            
+        return self.create(
+            portfolio=portfolio,
+            amount=amount
         )
-        if self.type == TransactionType.BUY:
-            if self.total_amount > self.portfolio.cash_balance:
-                raise ValidationError("Total purchase price is more than cash balance.")
-            holding.quantity += self.quantity
-            self.portfolio.cash_balance -= self.total_amount
-        elif self.type == TransactionType.SELL:
-            if (holding.quantity - self.quantity) < 0:
-                raise ValidationError("Cannot sell more shares than are held.")
-            holding.quantity -= self.quantity
-            self.portfolio.cash_balance += self.total_amount
-        
-        holding.save()
-        self.portfolio.save()
-        self.portfolio.update_total_value()
 
-# Model representing contributions made to a portfolio
 class Contribution(models.Model):
-    portfolio = models.ForeignKey(Portfolio, related_name="contributions", on_delete=models.CASCADE)
-    amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0.01)])
-    date = models.DateTimeField(auto_now_add=True)
+    portfolio = models.ForeignKey(
+        Portfolio,
+        related_name='contributions',
+        on_delete=models.CASCADE
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    date = models.DateTimeField(default=timezone.now, db_index=True)
+
+    objects = ContributionManager()
+
+    class Meta:
+        ordering = ['-date']
 
     def save(self, *args, **kwargs):
-        # Update the portfolio's cash balance and total contributions when a new contribution is made
-        super().save(*args, **kwargs)
-        self.portfolio.cash_balance += self.amount
-        self.portfolio.total_contributions += self.amount
-        self.portfolio.save()
-        self.portfolio.update_total_value()
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            Portfolio.objects.filter(pk=self.portfolio.pk).update(
+                cash_balance=F('cash_balance') + self.amount,
+                total_contributions=F('total_contributions') + self.amount,
+                total_value=F('total_value') + self.amount
+            )
